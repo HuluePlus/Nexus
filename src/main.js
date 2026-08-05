@@ -1,6 +1,7 @@
 import { createApp } from 'vue'
+import CyberAntDesignVue from '@hulueplus/cyber-ui'
+import '@hulueplus/cyber-ui/style.css'
 import App from './App.vue'
-import './styles/cyber-ui.css'
 import './styles/app.css'
 
-createApp(App).mount('#app')
+createApp(App).use(CyberAntDesignVue).mount('#app')

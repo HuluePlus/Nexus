@@ -9,6 +9,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@hulueplus/cyber-ui": "^0.1.0",
+    "ant-design-vue": "^4.2.6",
     "lucide-vue-next": "^0.468.0",
     "vue": "^3.5.13"
   },

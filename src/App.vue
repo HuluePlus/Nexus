@@ -1,12 +1,12 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { Badge, Button, Card, Input, Tag } from '@hulueplus/cyber-ui'
 import {
   Activity,
   AlertTriangle,
   ArrowDownRight,
   ArrowUpRight,
   Check,
-  ChevronDown,
   Clock3,
   Database,
   Gauge,
@@ -18,20 +18,13 @@ import {
   Search,
   ShieldCheck,
   SunMedium,
-  Terminal,
   Wifi,
   Zap,
 } from 'lucide-vue-next'
 
-import CyberButton from './components/cyber-ui/CyberButton.vue'
-import CyberIconButton from './components/cyber-ui/CyberIconButton.vue'
-import CyberPanel from './components/cyber-ui/CyberPanel.vue'
-import CyberPanelHeader from './components/cyber-ui/CyberPanelHeader.vue'
-import CyberStatusBadge from './components/cyber-ui/CyberStatusBadge.vue'
-import CyberStatusDot from './components/cyber-ui/CyberStatusDot.vue'
-import CyberTextField from './components/cyber-ui/CyberTextField.vue'
-
 const STATUS_API = 'https://status.input.im/api/status'
+const ACKNOWLEDGED_EVENTS_KEY = 'nexus-acknowledged-events'
+const THEME_KEY = 'nexus-theme'
 const emptyModel = {
   id: 'awaiting-telemetry',
   name: '等待数据',
@@ -120,8 +113,7 @@ const searchQuery = ref('')
 const sidebarOpen = ref(false)
 const isRefreshing = ref(false)
 const isPaused = ref(false)
-const incidentAcknowledged = ref(false)
-const loadingStatus = ref(true)
+const acknowledgedEventIds = ref(new Set())
 const liveError = ref('')
 const apiAllOk = ref(null)
 const theme = ref('cyan')
@@ -133,7 +125,6 @@ let syncTimer
 const selectedModel = computed(() => models.value.find((model) => model.id === selectedId.value) || models.value[0] || emptyModel)
 const onlineCount = computed(() => models.value.filter((model) => model.status === 'operational').length)
 const degradedCount = computed(() => models.value.filter((model) => model.status === 'degraded').length)
-const activeIncidentCount = computed(() => models.value.filter((model) => model.status !== 'operational').length)
 const averageUptime = computed(() => {
   if (!models.value.length) return '--'
   return `${(models.value.reduce((sum, model) => sum + model.uptimeValue, 0) / models.value.length).toFixed(2)}%`
@@ -149,11 +140,35 @@ const p95Latency = computed(() => {
   return formatLatency(values[Math.min(values.length - 1, Math.floor(values.length * 0.95))])
 })
 const liveStatusLabel = computed(() => {
-  if (loadingStatus.value) return '同步中'
+  if (isRefreshing.value) return '同步中'
+  if (isPaused.value) return '监控已暂停'
   if (liveError.value) return '数据异常'
   return apiAllOk.value ? '全部正常' : '需要关注'
 })
-const liveStatusTone = computed(() => (apiAllOk.value ? 'success' : 'danger'))
+const liveStatusTone = computed(() => {
+  if (isRefreshing.value) return 'processing'
+  if (isPaused.value) return 'warning'
+  if (liveError.value) return 'error'
+  return apiAllOk.value ? 'success' : 'warning'
+})
+const streamStatusText = computed(() => {
+  if (isRefreshing.value) return '正在同步'
+  if (isPaused.value) return '自动轮询已暂停'
+  if (liveError.value) return '数据流连接异常'
+  return '遥测已连接'
+})
+const streamStatusFlag = computed(() => {
+  if (isRefreshing.value) return '同步'
+  if (isPaused.value) return '暂停'
+  if (liveError.value) return '异常'
+  return '实时'
+})
+const liveFeedMessage = computed(() => {
+  if (isRefreshing.value) return '同步中...'
+  if (isPaused.value) return `已暂停 · 最后更新 ${lastSync.value}`
+  if (liveError.value) return liveError.value
+  return `已更新 ${lastSync.value}`
+})
 const filteredModels = computed(() => {
   const query = searchQuery.value.trim().toLowerCase()
   return models.value.filter((model) => {
@@ -193,18 +208,22 @@ const pulseBars = computed(() => {
   const max = Math.max(...values, 1)
   return values.slice(-30).map((value) => Math.max(8, (value / max) * 100))
 })
-const liveEvents = computed(() => models.value
+const recentEvents = computed(() => models.value
   .flatMap((model) => model.history.filter((sample) => !sample.ok).map((sample) => ({
+    id: `${model.id}:${sample.ts}`,
+    timestamp: sample.ts,
     time: formatApiTime(sample.ts),
     type: 'danger',
     title: sample.error?.includes('429') ? '上游限流' : '探针失败',
     detail: `${model.name} · ${sample.error || '未知上游错误'}`,
     code: parseErrorCode(sample.error),
+    acknowledged: acknowledgedEventIds.value.has(`${model.id}:${sample.ts}`),
   })))
-  .sort((a, b) => b.time.localeCompare(a.time))
-  .slice(0, 4))
+  .sort((a, b) => b.timestamp - a.timestamp))
+const liveEvents = computed(() => recentEvents.value.slice(0, 4))
+const unacknowledgedEventCount = computed(() => recentEvents.value.filter((event) => !event.acknowledged).length)
 const formattedTime = computed(() => now.value.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' }))
-const statusTone = (status) => status === 'operational' ? 'success' : status === 'degraded' || status === 'offline' ? 'danger' : 'accent'
+const statusTone = (status) => status === 'operational' ? 'success' : status === 'degraded' || status === 'offline' ? 'error' : 'processing'
 const statusText = (status) => status === 'operational' ? '正常' : status === 'degraded' ? '异常' : '离线'
 const sampleTooltip = (sample) => {
   const state = sample.ok ? '正常' : '失败'
@@ -221,11 +240,17 @@ function setFilter(filter) {
   activeFilter.value = filter
 }
 
+watch(filteredModels, (nextModels) => {
+  if (!nextModels.some((model) => model.id === selectedId.value)) selectedId.value = nextModels[0]?.id || ''
+})
+
 function applyTheme(nextTheme) {
-  theme.value = nextTheme
+  const normalizedTheme = nextTheme === 'magenta' ? 'magenta' : 'cyan'
+  theme.value = normalizedTheme
   document.documentElement.classList.remove('cyan', 'magenta')
-  document.documentElement.classList.add(nextTheme)
-  document.documentElement.dataset.cyberTheme = nextTheme
+  document.documentElement.classList.add(normalizedTheme)
+  document.documentElement.dataset.cyberTheme = normalizedTheme
+  window.localStorage.setItem(THEME_KEY, normalizedTheme)
 }
 
 function toggleTheme() {
@@ -248,17 +273,30 @@ async function refreshData() {
   } catch (error) {
     liveError.value = error instanceof Error ? error.message : '无法读取状态接口'
   } finally {
-    loadingStatus.value = false
     isRefreshing.value = false
   }
 }
 
-function runProbe() {
-  refreshData()
+function toggleMonitoring() {
+  isPaused.value = !isPaused.value
+  if (!isPaused.value) refreshData()
+}
+
+function acknowledgeRecentEvents() {
+  const nextIds = new Set(acknowledgedEventIds.value)
+  recentEvents.value.forEach((event) => nextIds.add(event.id))
+  acknowledgedEventIds.value = nextIds
+  window.localStorage.setItem(ACKNOWLEDGED_EVENTS_KEY, JSON.stringify([...nextIds].slice(-500)))
 }
 
 onMounted(() => {
-  applyTheme('cyan')
+  try {
+    const storedEventIds = JSON.parse(window.localStorage.getItem(ACKNOWLEDGED_EVENTS_KEY) || '[]')
+    if (Array.isArray(storedEventIds)) acknowledgedEventIds.value = new Set(storedEventIds.filter((id) => typeof id === 'string'))
+  } catch {
+    window.localStorage.removeItem(ACKNOWLEDGED_EVENTS_KEY)
+  }
+  applyTheme(window.localStorage.getItem(THEME_KEY) || 'cyan')
   refreshData()
   clockTimer = window.setInterval(() => {
     now.value = new Date(now.value.getTime() + 1000)
@@ -291,17 +329,16 @@ onUnmounted(() => {
           <span>私有实例</span>
           <strong>edge-lab / 01</strong>
         </div>
-        <ChevronDown :size="14" />
       </div>
 
       <div class="nav-label">当前视图 <span>LIVE</span></div>
-      <div class="sidebar-current"><Activity :size="16" /><span>模型状态总览</span><CyberStatusDot tone="success" /></div>
+      <div class="sidebar-current"><Activity :size="16" /><span>模型状态总览</span><Badge :status="liveStatusTone" /></div>
 
       <div class="sidebar-spacer" />
 
       <div class="sidebar-stream">
         <div class="stream-heading"><Wifi :size="14" /> 数据流频道</div>
-        <div class="stream-status"><CyberStatusDot tone="success" /><span>遥测已连接</span><strong>实时</strong></div>
+        <div class="stream-status" :class="{ 'stream-status--paused': isPaused, 'stream-status--error': liveError && !isPaused }"><Badge :status="liveStatusTone" /><span>{{ streamStatusText }}</span><strong>{{ streamStatusFlag }}</strong></div>
         <div class="stream-wave" aria-hidden="true">
           <span v-for="bar in 24" :key="bar" :style="{ height: `${18 + ((bar * 17) % 58)}%` }" />
         </div>
@@ -315,11 +352,11 @@ onUnmounted(() => {
 
     <section class="workspace">
       <header class="topbar">
-        <CyberIconButton label="打开导航" class="mobile-menu" @click="sidebarOpen = true"><Menu :size="18" /></CyberIconButton>
+        <Button type="text" shape="circle" title="打开导航" aria-label="打开导航" class="icon-button mobile-menu" @click="sidebarOpen = true"><Menu :size="18" /></Button>
         <div class="breadcrumbs"><span>NEXUS</span><i>/</i><strong>状态总览</strong><em>节点 01</em></div>
         <div class="topbar-actions">
           <div class="topbar-clock"><Clock3 :size="14" /><span>本地 // {{ formattedTime }}</span></div>
-          <CyberIconButton label="切换主题色" @click="toggleTheme"><SunMedium v-if="theme === 'cyan'" :size="16" /><Moon v-else :size="16" /></CyberIconButton>
+          <Button type="text" shape="circle" title="切换主题色" aria-label="切换主题色" class="icon-button" @click="toggleTheme"><SunMedium v-if="theme === 'cyan'" :size="16" /><Moon v-else :size="16" /></Button>
         </div>
       </header>
 
@@ -329,64 +366,64 @@ onUnmounted(() => {
             <div class="eyebrow-line"><span /> 可观测网格 <b>v2.6.4</b></div>
             <h1>模型状态中心</h1>
             <p>集中查看所有模型节点、实时探针和异常信号，保持你的私有模型集群始终可见。</p>
-            <div class="live-feed-note"><span class="live-feed-pip" :class="{ 'live-feed-pip--error': liveError }" /> 数据源 <b>status.input.im/api/status</b><span>·</span> 轮询 5 秒 <span>·</span> {{ liveError ? liveError : loadingStatus ? '连接中...' : `已更新 ${lastSync}` }}</div>
+            <div class="live-feed-note"><span class="live-feed-pip" :class="{ 'live-feed-pip--error': liveError, 'live-feed-pip--paused': isPaused }" /> 数据源 <b>status.input.im/api/status</b><span>·</span> 轮询 5 秒 <span>·</span> {{ liveFeedMessage }}</div>
           </div>
           <div class="health-orbit">
-            <div class="orbit-core"><CyberStatusDot :tone="liveStatusTone" /><span>{{ liveStatusLabel }}</span><strong>{{ onlineCount }}/{{ models.length }}</strong></div>
+            <div class="orbit-core"><Badge :status="liveStatusTone" /><span>{{ liveStatusLabel }}</span><strong>{{ onlineCount }}/{{ models.length }}</strong></div>
             <div class="orbit-ring ring-one" /><div class="orbit-ring ring-two" />
           </div>
         </section>
 
         <section class="stat-grid" aria-label="节点概览">
-          <CyberPanel variant="metric" class="stat-card stat-card--cyan">
+          <Card class="stat-card stat-card--cyan">
             <div class="stat-top"><span>节点健康</span><Activity :size="16" /></div>
             <div class="stat-value">{{ onlineCount }}<small>/{{ models.length }}</small></div>
-            <div class="stat-footer"><CyberStatusDot tone="success" /> 在线节点 <span>实时</span></div>
-          </CyberPanel>
-          <CyberPanel variant="metric" class="stat-card">
+            <div class="stat-footer"><Badge :status="liveStatusTone" /> 在线节点 <span>{{ isRefreshing ? '同步中' : isPaused ? '已暂停' : liveError ? '异常' : '实时' }}</span></div>
+          </Card>
+          <Card class="stat-card">
             <div class="stat-top"><span>可用率 / 30 天</span><ShieldCheck :size="16" /></div>
             <div class="stat-value">{{ averageUptime }}<small v-if="averageUptime !== '--'">平均</small></div>
             <div class="stat-footer"><ArrowUpRight :size="13" /> 来自实时状态接口</div>
-          </CyberPanel>
-          <CyberPanel variant="metric" class="stat-card">
+          </Card>
+          <Card class="stat-card">
             <div class="stat-top"><span>延迟中位数</span><Gauge :size="16" /></div>
             <div class="stat-value">{{ medianLatency }}<small v-if="medianLatency !== '--'">中位</small></div>
             <div class="stat-footer stat-footer--warning"><Zap :size="13" /> p95：{{ p95Latency }}</div>
-          </CyberPanel>
-          <CyberPanel variant="metric" class="stat-card stat-card--danger">
-            <div class="stat-top"><span>活跃事件</span><AlertTriangle :size="16" /></div>
-            <div class="stat-value">{{ Math.max(activeIncidentCount - (incidentAcknowledged ? 1 : 0), 0) }}<small> 个</small></div>
-            <div class="stat-footer stat-footer--danger"><CyberStatusDot tone="danger" /> {{ degradedCount }} 个失败探针</div>
-          </CyberPanel>
+          </Card>
+          <Card class="stat-card stat-card--danger">
+            <div class="stat-top"><span>未确认事件</span><AlertTriangle :size="16" /></div>
+            <div class="stat-value">{{ unacknowledgedEventCount }}<small> 个</small></div>
+            <div class="stat-footer stat-footer--danger"><Badge status="error" /> 最近 60 分钟</div>
+          </Card>
         </section>
 
         <section class="control-bar">
-          <CyberTextField id="model-filter" v-model="searchQuery" label="" placeholder="筛选模型...">
-            <template #icon><Search :size="16" /></template>
+          <Input id="model-filter" v-model:value="searchQuery" allow-clear class="model-filter" placeholder="筛选模型...">
+            <template #prefix><Search :size="16" /></template>
             <template #suffix>{{ filteredModels.length }} 个节点</template>
-          </CyberTextField>
+          </Input>
           <div class="filter-chips" role="group" aria-label="筛选模型状态">
-            <button type="button" :class="{ active: activeFilter === 'all' }" @click="setFilter('all')">全部 <span>{{ models.length }}</span></button>
-            <button type="button" :class="{ active: activeFilter === 'online' }" @click="setFilter('online')">在线 <span>{{ onlineCount }}</span></button>
-            <button type="button" :class="{ active: activeFilter === 'degraded' }" @click="setFilter('degraded')">异常 <span>{{ degradedCount }}</span></button>
+            <button type="button" :aria-pressed="activeFilter === 'all'" :class="{ active: activeFilter === 'all' }" @click="setFilter('all')">全部 <span>{{ models.length }}</span></button>
+            <button type="button" :aria-pressed="activeFilter === 'online'" :class="{ active: activeFilter === 'online' }" @click="setFilter('online')">在线 <span>{{ onlineCount }}</span></button>
+            <button type="button" :aria-pressed="activeFilter === 'degraded'" :class="{ active: activeFilter === 'degraded' }" @click="setFilter('degraded')">异常 <span>{{ degradedCount }}</span></button>
           </div>
-          <CyberButton variant="ghost" :loading="isRefreshing" loading-label="同步中" @click="refreshData">
+          <Button type="text" class="sync-button" :loading="isRefreshing" @click="refreshData">
             <template #icon><RefreshCcw :size="15" :class="{ 'spin-icon': isRefreshing }" /></template>
-            立即同步
-          </CyberButton>
+            {{ isRefreshing ? '同步中' : '立即同步' }}
+          </Button>
         </section>
 
-        <section class="dashboard-grid">
-          <CyberPanel class="fleet-panel">
-            <CyberPanelHeader>
+        <section class="dashboard-grid" :class="{ 'dashboard-grid--single': !filteredModels.length }">
+          <Card class="fleet-panel">
+            <template #title>
               <span><span class="header-signal" /> 实时模型矩阵</span>
-              <span class="panel-meta">60 分钟窗口 <b>·</b> 探测间隔 60 秒</span>
-            </CyberPanelHeader>
+              <span class="panel-meta">60 分钟窗口 <b>·</b> 采样间隔 60 秒 <b v-if="isPaused">· 已暂停</b></span>
+            </template>
             <div class="matrix-heading"><span>模型 / 提供方</span><span>状态</span><span>延迟</span><span>可用率</span><span>历史信号</span></div>
             <div class="model-list">
-              <button v-for="model in filteredModels" :key="model.id" type="button" class="model-row" :class="{ selected: selectedId === model.id }" @click="selectModel(model)">
+              <button v-for="model in filteredModels" :key="model.id" type="button" class="model-row" :aria-pressed="selectedId === model.id" :class="{ selected: selectedId === model.id }" @click="selectModel(model)">
                 <div class="model-name"><span class="provider-mark" :class="`provider-mark--${model.provider.toLowerCase()}`">{{ model.provider.slice(0, 2) }}</span><div><strong>{{ model.name }}</strong><small>{{ model.provider }} · {{ model.family }}</small></div></div>
-                <CyberStatusBadge><CyberStatusDot :tone="statusTone(model.status)" /> {{ statusText(model.status) }}</CyberStatusBadge>
+                <Tag class="status-badge"><Badge :status="statusTone(model.status)" /> {{ statusText(model.status) }}</Tag>
                 <strong class="row-metric" :class="{ 'row-metric--muted': model.status === 'offline' }">{{ model.latency }}</strong>
                 <span class="row-uptime">{{ model.uptime }}</span>
                 <div class="sample-strip" :aria-label="`${model.name} 历史采样`"><span v-for="(sample, index) in model.samples" :key="`${model.id}-${index}`" :class="`sample-${sample.ok ? 'up' : 'down'}`" :data-tooltip="sampleTooltip(sample)" :title="sampleTooltip(sample)" /></div>
@@ -395,48 +432,48 @@ onUnmounted(() => {
               <div v-if="!filteredModels.length" class="empty-state"><Search :size="18" /> 当前没有匹配的节点</div>
             </div>
             <div class="panel-foot"><span><span class="legend-dot legend-dot--up" /> 正常响应</span><span><span class="legend-dot legend-dot--warn" /> 延迟提醒</span><span><span class="legend-dot legend-dot--down" /> 失败采样</span><span class="foot-spacer" /> 最近同步 <b>{{ lastSync }}</b></div>
-          </CyberPanel>
+          </Card>
 
-          <CyberPanel class="detail-panel">
-            <CyberPanelHeader>
+          <Card v-if="filteredModels.length" class="detail-panel">
+            <template #title>
               <span><span class="header-signal header-signal--magenta" /> 当前节点</span>
-              <span class="panel-meta">信号 / 24 小时</span>
-            </CyberPanelHeader>
+              <span class="panel-meta">信号 / 60 分钟</span>
+            </template>
             <div class="detail-content">
-              <div class="detail-title-row"><div><div class="detail-kicker">{{ selectedModel.provider }} // {{ selectedModel.id }}</div><h2>{{ selectedModel.name }}</h2><p>{{ selectedModel.family }}</p></div><CyberStatusBadge><CyberStatusDot :tone="statusTone(selectedModel.status)" /> {{ statusText(selectedModel.status) }}</CyberStatusBadge></div>
+              <div class="detail-title-row"><div><div class="detail-kicker">{{ selectedModel.provider }} // {{ selectedModel.id }}</div><h2>{{ selectedModel.name }}</h2><p>{{ selectedModel.family }}</p></div><Tag class="status-badge"><Badge :status="statusTone(selectedModel.status)" /> {{ statusText(selectedModel.status) }}</Tag></div>
               <div class="detail-metrics"><div><span>最近延迟</span><strong>{{ selectedModel.latency }}</strong></div><div><span>可用率</span><strong>{{ selectedModel.uptime }}</strong></div><div><span>历史采样</span><strong>{{ selectedModel.requests }}</strong></div></div>
               <div class="chart-wrap"><div class="chart-heading"><span>响应时间 / 毫秒</span><strong><ArrowDownRight :size="13" /> {{ selectedDelta }}</strong></div><svg class="signal-chart" viewBox="0 0 460 130" role="img" aria-label="当前模型响应时间趋势图"><path class="chart-grid" d="M0 14H460 M0 44H460 M0 74H460 M0 104H460 M0 129H460 M0 0V130 M88 0V130 M176 0V130 M264 0V130 M352 0V130 M440 0V130" /><polyline :points="chartPoints" /><circle :cx="chartLastPoint.x" :cy="chartLastPoint.y" r="4" /><circle :cx="chartLastPoint.x" :cy="chartLastPoint.y" r="9" class="chart-pulse" /></svg><div class="chart-axis"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>现在</span></div></div>
-              <div class="detail-actions"><CyberButton variant="primary" :loading="isRefreshing" loading-label="探测中" @click="runProbe"><template #icon><Play :size="15" /></template>立即探测</CyberButton><CyberButton variant="secondary" @click="isPaused = !isPaused"><template #icon><Pause v-if="!isPaused" :size="15" /><Play v-else :size="15" /></template>{{ isPaused ? '恢复监控' : '暂停监控' }}</CyberButton></div>
+              <div class="detail-actions"><Button class="secondary-action" :aria-pressed="isPaused" @click="toggleMonitoring"><template #icon><Pause v-if="!isPaused" :size="15" /><Play v-else :size="15" /></template>{{ isPaused ? '恢复监控' : '暂停监控' }}</Button></div>
             </div>
-          </CyberPanel>
+          </Card>
         </section>
 
         <section class="lower-grid">
-          <CyberPanel class="pulse-panel">
-            <CyberPanelHeader><span><span class="header-signal" /> 延迟脉冲</span><span class="panel-meta">全节点平均</span></CyberPanelHeader>
+          <Card class="pulse-panel">
+            <template #title><span><span class="header-signal" /> 延迟脉冲</span><span class="panel-meta">全节点平均</span></template>
             <div class="pulse-body"><div class="pulse-summary"><div><strong>{{ medianLatency }}</strong><small>实时延迟中位数</small></div><div class="pulse-delta"><Database :size="14" /> <span>{{ models.length }} 个节点<small>{{ models.length ? '实时采样池' : '等待数据流' }}</small></span></div></div><div class="bar-chart"><div v-for="(bar, index) in pulseBars" :key="index" class="bar-column"><span :style="{ height: `${bar}%` }" /></div></div><div class="bar-axis"><span>-60 分钟</span><span>-45 分钟</span><span>-30 分钟</span><span>-15 分钟</span><span>现在</span></div></div>
-          </CyberPanel>
+          </Card>
 
-          <CyberPanel class="events-panel">
-            <CyberPanelHeader><span><span class="header-signal header-signal--warning" /> 信号日志</span><span class="panel-meta">实时</span></CyberPanelHeader>
+          <Card class="events-panel">
+            <template #title><span><span class="header-signal header-signal--warning" /> 信号日志</span><span class="panel-meta">{{ unacknowledgedEventCount }} 个未确认</span></template>
             <div class="event-list">
-              <div v-for="event in liveEvents" :key="`${event.code}-${event.time}-${event.detail}`" class="event-row" :class="`event-row--${event.type}`"><span class="event-time">{{ event.time }}</span><span class="event-icon"><AlertTriangle :size="13" /></span><div><strong>{{ event.title }}</strong><small>{{ event.detail }}</small></div><code>{{ event.code }}</code></div>
+              <div v-for="event in liveEvents" :key="event.id" class="event-row" :class="[`event-row--${event.type}`, { 'event-row--acknowledged': event.acknowledged }]"><span class="event-time">{{ event.time }}</span><span class="event-icon"><Check v-if="event.acknowledged" :size="13" /><AlertTriangle v-else :size="13" /></span><div><strong>{{ event.title }}</strong><small>{{ event.detail }}</small></div><code>{{ event.acknowledged ? 'ACK' : event.code }}</code></div>
               <div v-if="!liveEvents.length" class="event-empty"><Check :size="15" /> 当前数据流没有失败采样</div>
             </div>
-            <div class="events-footer"><button type="button" @click="incidentAcknowledged = !incidentAcknowledged"><Check :size="14" /> {{ incidentAcknowledged ? '事件已确认' : '确认最新事件' }}</button></div>
-          </CyberPanel>
+            <div v-if="recentEvents.length" class="events-footer"><Button type="text" class="ack-button" :disabled="unacknowledgedEventCount === 0" @click="acknowledgeRecentEvents"><template #icon><Check :size="14" /></template>{{ unacknowledgedEventCount ? `确认全部事件 (${unacknowledgedEventCount})` : '当前事件已确认' }}</Button></div>
+          </Card>
 
-          <CyberPanel class="regions-panel">
-            <CyberPanelHeader><span><span class="header-signal header-signal--magenta" /> 数据源契约</span><span class="panel-meta">实时 JSON</span></CyberPanelHeader>
+          <Card class="regions-panel">
+            <template #title><span><span class="header-signal header-signal--magenta" /> 数据源契约</span><span class="panel-meta">{{ isPaused ? '缓存 JSON' : '实时 JSON' }}</span></template>
             <div class="source-contract"><div><span>接口</span><strong>/api/status</strong></div><div><span>模型数量</span><strong>{{ models.length }} 个</strong></div><div><span>每节点采样</span><strong>{{ models[0]?.history.length || '--' }} 条</strong></div><div><span>访问方式</span><strong>跨域：*</strong></div></div>
-            <div class="region-footer"><Database :size="14" /><span>{{ liveError ? liveError : '直连数据流 · 无模拟数据' }}</span><ShieldCheck :size="14" /></div>
-          </CyberPanel>
+            <div class="region-footer"><Database :size="14" /><span>{{ isPaused ? '自动轮询已暂停 · 可手动同步' : liveError ? liveError : '直连数据流 · 无模拟数据' }}</span><ShieldCheck :size="14" /></div>
+          </Card>
         </section>
 
         <footer class="workspace-footer"><span><span class="footer-mark" /> NEXUS 可观测网格</span><span>私有实例 // 不同步云端</span><span>构建 026.08</span></footer>
       </div>
     </section>
 
-    <div v-if="sidebarOpen" class="sidebar-scrim" @click="sidebarOpen = false" />
+    <button v-if="sidebarOpen" type="button" class="sidebar-scrim" aria-label="关闭导航" @click="sidebarOpen = false" />
   </main>
 </template>
