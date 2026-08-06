@@ -63,9 +63,15 @@ a { color: inherit; }
   z-index: 8;
   display: flex;
   width: 252px;
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
   flex: none;
   flex-direction: column;
+  align-self: flex-start;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   border-right: 1px solid rgba(81, 139, 162, .22);
   background: linear-gradient(180deg, #080d14 0%, #060910 72%, #080a11 100%);
   box-shadow: 18px 0 60px rgba(0, 0, 0, .24);
