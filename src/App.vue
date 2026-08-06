@@ -6,6 +6,9 @@ import {
   AlertTriangle,
   ArrowDownRight,
   ArrowUpRight,
+  Bell,
+  BellOff,
+  BellRing,
   Check,
   Clock3,
   Database,
@@ -19,11 +22,14 @@ import {
   ShieldCheck,
   SunMedium,
   Wifi,
+  X,
   Zap,
 } from 'lucide-vue-next'
 
 const STATUS_API = 'https://status.input.im/api/status'
+const WATCHED_MODEL = 'gpt-5.6-sol'
 const ACKNOWLEDGED_EVENTS_KEY = 'nexus-acknowledged-events'
+const NOTIFICATIONS_ENABLED_KEY = 'nexus-notifications-enabled'
 const THEME_KEY = 'nexus-theme'
 const emptyModel = {
   id: 'awaiting-telemetry',
@@ -119,8 +125,14 @@ const apiAllOk = ref(null)
 const theme = ref('cyan')
 const now = ref(new Date())
 const lastSync = ref('--')
+const notificationsEnabled = ref(false)
+const notificationPermission = ref('default')
+const notificationRequestPending = ref(false)
+const statusNotice = ref(null)
 let clockTimer
 let syncTimer
+let noticeTimer
+let lastWatchedModelAvailability = null
 
 const selectedModel = computed(() => models.value.find((model) => model.id === selectedId.value) || models.value[0] || emptyModel)
 const onlineCount = computed(() => models.value.filter((model) => model.status === 'operational').length)
@@ -223,6 +235,12 @@ const recentEvents = computed(() => models.value
 const liveEvents = computed(() => recentEvents.value.slice(0, 4))
 const unacknowledgedEventCount = computed(() => recentEvents.value.filter((event) => !event.acknowledged).length)
 const formattedTime = computed(() => now.value.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' }))
+const notificationStateText = computed(() => {
+  if (notificationsEnabled.value) return '已开启'
+  if (notificationPermission.value === 'unsupported') return '当前浏览器不可用'
+  if (notificationPermission.value === 'denied') return '权限已被阻止'
+  return '已关闭'
+})
 const statusTone = (status) => status === 'operational' ? 'success' : status === 'degraded' || status === 'offline' ? 'error' : 'processing'
 const statusText = (status) => status === 'operational' ? '正常' : status === 'degraded' ? '异常' : '离线'
 const sampleTooltip = (sample) => {
@@ -257,6 +275,117 @@ function toggleTheme() {
   applyTheme(theme.value === 'cyan' ? 'magenta' : 'cyan')
 }
 
+function showStatusNotice(title, detail, tone = 'info') {
+  window.clearTimeout(noticeTimer)
+  statusNotice.value = { title, detail, tone }
+  noticeTimer = window.setTimeout(() => {
+    statusNotice.value = null
+  }, 6500)
+}
+
+function closeStatusNotice() {
+  window.clearTimeout(noticeTimer)
+  statusNotice.value = null
+}
+
+function persistNotificationsEnabled(enabled) {
+  notificationsEnabled.value = enabled
+  window.localStorage.setItem(NOTIFICATIONS_ENABLED_KEY, String(enabled))
+}
+
+function syncNotificationPermission() {
+  if (!('Notification' in window) || !window.isSecureContext) {
+    notificationPermission.value = 'unsupported'
+    if (notificationsEnabled.value) persistNotificationsEnabled(false)
+    return
+  }
+
+  notificationPermission.value = window.Notification.permission
+  if (notificationsEnabled.value && notificationPermission.value !== 'granted') {
+    persistNotificationsEnabled(false)
+  }
+}
+
+async function toggleNotifications() {
+  if (notificationsEnabled.value) {
+    persistNotificationsEnabled(false)
+    showStatusNotice('状态通知已关闭', `${WATCHED_MODEL} 状态变化时不再发送通知。`)
+    return
+  }
+
+  syncNotificationPermission()
+  if (notificationPermission.value === 'unsupported') {
+    showStatusNotice('无法开启系统通知', '请使用支持通知且通过 HTTPS 访问的浏览器。', 'warning')
+    return
+  }
+  if (notificationPermission.value === 'denied') {
+    showStatusNotice('通知权限已被阻止', '请在浏览器的网站权限中允许通知后重试。', 'warning')
+    return
+  }
+
+  notificationRequestPending.value = true
+  try {
+    if (window.Notification.permission === 'default') {
+      notificationPermission.value = await window.Notification.requestPermission()
+    }
+    if (notificationPermission.value !== 'granted') {
+      showStatusNotice('未开启状态通知', '浏览器没有授予通知权限。', 'warning')
+      return
+    }
+    persistNotificationsEnabled(true)
+    showStatusNotice('状态通知已开启', `${WATCHED_MODEL} 可用状态变化时会在这里和系统通知中提醒。`, 'success')
+  } catch {
+    showStatusNotice('无法开启系统通知', '浏览器通知权限请求失败，请稍后重试。', 'warning')
+  } finally {
+    notificationRequestPending.value = false
+  }
+}
+
+function announceWatchedModelAvailability(model) {
+  if (!notificationsEnabled.value) return
+
+  const isAvailable = model.status === 'operational'
+  const title = isAvailable ? `${WATCHED_MODEL} 已恢复可用` : `${WATCHED_MODEL} 已不可用`
+  const detail = isAvailable
+    ? `服务已恢复正常，当前延迟 ${model.latency}。`
+    : '最新探针请求失败，请打开状态面板查看详情。'
+  const tone = isAvailable ? 'success' : 'danger'
+  showStatusNotice(title, detail, tone)
+
+  syncNotificationPermission()
+  if (!notificationsEnabled.value) return
+
+  try {
+    const notification = new window.Notification(title, {
+      body: detail,
+      icon: `${window.location.origin}/nexus-icon.svg`,
+      tag: `nexus-${WATCHED_MODEL}-availability`,
+      renotify: true,
+    })
+    notification.onclick = () => {
+      window.focus()
+      notification.close()
+    }
+  } catch {
+    // The in-page notice remains available if the OS notification bridge fails.
+  }
+}
+
+function trackWatchedModelAvailability(nextModels) {
+  const watchedModel = nextModels.find((model) => model.name === WATCHED_MODEL)
+  if (!watchedModel) return
+
+  const isAvailable = watchedModel.status === 'operational'
+  if (lastWatchedModelAvailability === null) {
+    lastWatchedModelAvailability = isAvailable
+    return
+  }
+  if (lastWatchedModelAvailability === isAvailable) return
+
+  lastWatchedModelAvailability = isAvailable
+  announceWatchedModelAvailability(watchedModel)
+}
+
 async function refreshData() {
   if (isRefreshing.value) return
   isRefreshing.value = true
@@ -265,6 +394,7 @@ async function refreshData() {
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
     const payload = await response.json()
     const nextModels = Array.isArray(payload.services) ? payload.services.map(mapService) : []
+    trackWatchedModelAvailability(nextModels)
     models.value = nextModels
     apiAllOk.value = Boolean(payload.all_ok)
     lastSync.value = formatApiTime(payload.generated_at)
@@ -296,8 +426,13 @@ onMounted(() => {
   } catch {
     window.localStorage.removeItem(ACKNOWLEDGED_EVENTS_KEY)
   }
+  syncNotificationPermission()
+  if (window.localStorage.getItem(NOTIFICATIONS_ENABLED_KEY) === 'true' && notificationPermission.value === 'granted') {
+    notificationsEnabled.value = true
+  }
   applyTheme(window.localStorage.getItem(THEME_KEY) || 'cyan')
   refreshData()
+  window.addEventListener('focus', syncNotificationPermission)
   clockTimer = window.setInterval(() => {
     now.value = new Date(now.value.getTime() + 1000)
   }, 1000)
@@ -309,6 +444,8 @@ onMounted(() => {
 onUnmounted(() => {
   window.clearInterval(clockTimer)
   window.clearInterval(syncTimer)
+  window.clearTimeout(noticeTimer)
+  window.removeEventListener('focus', syncNotificationPermission)
 })
 </script>
 
@@ -343,6 +480,24 @@ onUnmounted(() => {
           <span v-for="bar in 24" :key="bar" :style="{ height: `${18 + ((bar * 17) % 58)}%` }" />
         </div>
         <small>最近数据包 <b>{{ lastSync }}</b></small>
+        <div class="notification-control">
+          <div class="notification-control__label">
+            <BellRing :size="14" />
+            <span><strong>状态通知</strong><small>{{ notificationStateText }}</small></span>
+          </div>
+          <button
+            type="button"
+            class="notification-switch"
+            :class="{ 'notification-switch--active': notificationsEnabled }"
+            role="switch"
+            :aria-checked="notificationsEnabled"
+            :aria-label="notificationsEnabled ? '关闭 gpt-5.6-sol 状态通知' : '开启 gpt-5.6-sol 状态通知'"
+            :disabled="notificationRequestPending"
+            @click="toggleNotifications"
+          >
+            <span><Bell v-if="notificationsEnabled" :size="11" /><BellOff v-else :size="11" /></span>
+          </button>
+        </div>
       </div>
 
       <div class="sidebar-footer">
@@ -475,5 +630,13 @@ onUnmounted(() => {
     </section>
 
     <button v-if="sidebarOpen" type="button" class="sidebar-scrim" aria-label="关闭导航" @click="sidebarOpen = false" />
+
+    <Transition name="status-notice">
+      <div v-if="statusNotice" class="status-notice" :class="`status-notice--${statusNotice.tone}`" role="status" aria-live="polite">
+        <span class="status-notice__icon"><BellRing :size="17" /></span>
+        <div><strong>{{ statusNotice.title }}</strong><p>{{ statusNotice.detail }}</p></div>
+        <Button type="text" shape="circle" title="关闭通知" aria-label="关闭通知" class="status-notice__close" @click="closeStatusNotice"><X :size="15" /></Button>
+      </div>
+    </Transition>
   </main>
 </template>
