@@ -80,6 +80,15 @@ function formatApiTime(timestamp) {
   return new Date(timestamp * 1000).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
 }
 
+function formatDuration(seconds) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '不足 1 分钟'
+  const minutes = Math.max(1, Math.round(seconds / 60))
+  if (minutes < 60) return `${minutes} 分钟`
+  const hours = Math.floor(minutes / 60)
+  const remainingMinutes = minutes % 60
+  return remainingMinutes ? `${hours} 小时 ${remainingMinutes} 分钟` : `${hours} 小时`
+}
+
 function parseErrorCode(error) {
   const match = error?.match(/HTTP (\d+)/)
   return match ? `HTTP-${match[1]}` : 'ERR-API'
@@ -346,9 +355,15 @@ function announceWatchedModelAvailability(model) {
 
   const isAvailable = model.status === 'operational'
   const title = isAvailable ? `${WATCHED_MODEL} 已恢复可用` : `${WATCHED_MODEL} 已不可用`
+  const previousDuration = getPreviousAvailabilityDuration(model)
+  const durationDetail = previousDuration === null
+    ? ''
+    : isAvailable
+      ? `此前异常持续 ${formatDuration(previousDuration)}。`
+      : `此前正常持续 ${formatDuration(previousDuration)}。`
   const detail = isAvailable
-    ? `服务已恢复正常，当前延迟 ${model.latency}。`
-    : '最新探针请求失败，请打开状态面板查看详情。'
+    ? `${durationDetail}服务已恢复正常，当前延迟 ${model.latency}。`
+    : `${durationDetail}最新探针请求失败，请打开状态面板查看详情。`
   const tone = isAvailable ? 'success' : 'danger'
   showStatusNotice(title, detail, tone)
 
@@ -369,6 +384,25 @@ function announceWatchedModelAvailability(model) {
   } catch {
     // The in-page notice remains available if the OS notification bridge fails.
   }
+}
+
+function getPreviousAvailabilityDuration(model) {
+  const history = model.history
+  if (!Array.isArray(history) || history.length < 2) return null
+
+  const currentIndex = history.length - 1
+  const currentSample = history[currentIndex]
+  const previousIndex = currentIndex - 1
+  const previousAvailable = Boolean(history[previousIndex]?.ok)
+  if (previousAvailable === Boolean(currentSample?.ok)) return null
+
+  let startIndex = previousIndex
+  while (startIndex > 0 && Boolean(history[startIndex - 1]?.ok) === previousAvailable) startIndex -= 1
+
+  const currentTimestamp = Number(currentSample?.ts)
+  const startTimestamp = Number(history[startIndex]?.ts)
+  if (!Number.isFinite(currentTimestamp) || !Number.isFinite(startTimestamp)) return null
+  return Math.max(0, currentTimestamp - startTimestamp)
 }
 
 function trackWatchedModelAvailability(nextModels) {
