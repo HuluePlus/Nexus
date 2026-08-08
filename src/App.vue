@@ -570,7 +570,7 @@ onUnmounted(() => {
             <div class="stat-footer"><Badge :status="liveStatusTone" /> 在线节点 <span>{{ isRefreshing ? '同步中' : isPaused ? '已暂停' : liveError ? '异常' : '实时' }}</span></div>
           </Card>
           <Card class="stat-card">
-            <div class="stat-top"><span>可用率 / 30 天</span><ShieldCheck :size="16" /></div>
+            <div class="stat-top"><span>可用率 / 1 小时</span><ShieldCheck :size="16" /></div>
             <div class="stat-value">{{ averageUptime }}<small v-if="averageUptime !== '--'">平均</small></div>
             <div class="stat-footer"><ArrowUpRight :size="13" /> 来自实时状态接口</div>
           </Card>
@@ -608,7 +608,7 @@ onUnmounted(() => {
               <span><span class="header-signal" /> 实时模型矩阵</span>
               <span class="panel-meta">60 分钟窗口 <b>·</b> 采样间隔 60 秒 <b v-if="isPaused">· 已暂停</b></span>
             </template>
-            <div class="matrix-heading"><span>模型 / 提供方</span><span>状态</span><span>延迟</span><span>可用率</span><span>历史信号</span></div>
+            <div class="matrix-heading"><span>模型 / 提供方</span><span>状态</span><span>延迟</span><span>1 小时可用率</span><span>历史信号</span></div>
             <div class="model-list">
               <button v-for="model in filteredModels" :key="model.id" type="button" class="model-row" :aria-pressed="selectedId === model.id" :class="{ selected: selectedId === model.id }" @click="selectModel(model)">
                 <div class="model-name"><span class="provider-mark" :class="`provider-mark--${model.provider.toLowerCase()}`">{{ model.provider.slice(0, 2) }}</span><div><strong>{{ model.name }}</strong><small>{{ model.provider }} · {{ model.family }}</small></div></div>
@@ -630,7 +630,7 @@ onUnmounted(() => {
             </template>
             <div class="detail-content">
               <div class="detail-title-row"><div><div class="detail-kicker">{{ selectedModel.provider }} // {{ selectedModel.id }}</div><h2>{{ selectedModel.name }}</h2><p>{{ selectedModel.family }}</p></div><Tag class="status-badge"><Badge :status="statusTone(selectedModel.status)" /> {{ statusText(selectedModel.status) }}</Tag></div>
-              <div class="detail-metrics"><div><span>最近延迟</span><strong>{{ selectedModel.latency }}</strong></div><div><span>可用率</span><strong>{{ selectedModel.uptime }}</strong></div><div><span>历史采样</span><strong>{{ selectedModel.requests }}</strong></div></div>
+              <div class="detail-metrics"><div><span>最近延迟</span><strong>{{ selectedModel.latency }}</strong></div><div><span>1 小时可用率</span><strong>{{ selectedModel.uptime }}</strong></div><div><span>历史采样</span><strong>{{ selectedModel.requests }}</strong></div></div>
               <div class="chart-wrap"><div class="chart-heading"><span>响应时间 / 毫秒</span><strong><ArrowDownRight :size="13" /> {{ selectedDelta }}</strong></div><svg class="signal-chart" viewBox="0 0 460 130" role="img" aria-label="当前模型响应时间趋势图"><path class="chart-grid" d="M0 14H460 M0 44H460 M0 74H460 M0 104H460 M0 129H460 M0 0V130 M88 0V130 M176 0V130 M264 0V130 M352 0V130 M440 0V130" /><polyline :points="chartPoints" /><circle :cx="chartLastPoint.x" :cy="chartLastPoint.y" r="4" /><circle :cx="chartLastPoint.x" :cy="chartLastPoint.y" r="9" class="chart-pulse" /></svg><div class="chart-axis"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>现在</span></div></div>
               <div class="detail-actions"><Button class="secondary-action" :aria-pressed="isPaused" @click="toggleMonitoring"><template #icon><Pause v-if="!isPaused" :size="15" /><Play v-else :size="15" /></template>{{ isPaused ? '恢复监控' : '暂停监控' }}</Button></div>
             </div>
